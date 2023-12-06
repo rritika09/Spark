@@ -1,0 +1,120 @@
+Pyspark: Partition Pruning, Predicate, and Projection Pushdown
+Justin Davis
+Justin Davis
+
+·
+Following
+
+4 min read
+·
+Jun 25
+13
+
+
+
+
+
+
+Pyspark filters are able to be pushed down to the input level, reducing the amount of I/O and ultimately improving performance. This article will explain partition pruning, predicate pushdown, and projection pushdown and how to view the spark plan to verify the filters are being pushed down.
+
+Predicate Pushdown — A predicate is a statement about your dataset. A few examples are (i) customers whose first name is Jodi (ii) customers who are under 25 (iii) customers from the United States. Spark allows you to apply these filters to the point the data is loaded, only loading in the data that passes a given filter, saving on a lot of input/output latency and memory. Below will show how to apply this type of filter and how to verify spark is using it to reduce the amount of data loaded.
+
+Projection Pushdown — Projections reduce the size of the input dataset by only reading columns that are used. If you are working with sales data and need total sales and sale id values, but do not need the timestamp a sale occurred, you can select only the sale amount and transaction id, and never load in the timestamp. This pruning reduces the amount of data that is loaded and leaves more resources available for the rest of your job. Examples will be given below.
+
+Partition Pruning — Partition pruning takes advantage of how the data is stored. A common partition value is the date data was logged or created. If you are only interested in sales from the last week, you can specify the sales date to be greater than or equal to 7 days ago. Again, an example will be shown below along with where to find the PartitionFilters applied to a data load.
+
+
+0. Generate Dataset
+I generated a fake dataset to demonstrate the different types of filters using faker, uuid, datetime, and random:
+
+import random
+from pyspark.sql import Row
+from datetime import timedelta, datetime, date
+from faker import Faker
+
+def create_data():
+    faker = Faker()
+    sale_values = [1.00, 2.00, 3.00, 5.00, 10.0]
+    days = random.randint(0, 20)
+    data = {
+        "sale_id": str(uuid.uuid1()),
+        "sale_amount": random.choice(sale_values),
+        "name": faker.first_name(),
+        "date": date.today() - timedelta(days = days)
+    }
+    return data
+
+data = [create_data() for i in range(1000)]
+df = spark.createDataFrame(Row(**x) for x in data).cache()
+(
+    df.write.mode("overwrite")
+    .partitionBy("date")
+    .save(path)
+)
+Predicate Pushdown
+Recall from above predicate pushdown is able to filter a dataset based on a given statement aka a predicate. Say we only want transactions from the above query that are greater than $4.00. You can put that logic into a filter statement when loading the dataset and see the filter using explain like so:
+
+from pyspark.sql import functions as F
+(
+    spark.read.load(path)
+    .filter(F.col("sale_amount") > 4.00)
+    .explain()
+)
+== Physical Plan ==
+*(1) Filter (isnotnull(sale_amount#1111) AND (sale_amount#1111 > 4.0))
++- *(1) ColumnarToRow
+   +- FileScan parquet [sale_id#1110,sale_amount#1111,name#1112,date#1113] Batched: true, DataFilters: [isnotnull(sale_amount#1111), (sale_amount#1111 > 4.0)], Format: Parquet, Location: InMemoryFileIndex(1 paths)[file:/Users/justindavis/Documents/my_projects/filter_dataset], PartitionFilters: [], PushedFilters: [IsNotNull(sale_amount), GreaterThan(sale_amount,4.0)], ReadSchema: struct<sale_id:string,sale_amount:double,name:string>
+Looking at the physical plan, you can see two statements under the PushedFilters: one checks the sale_amount is not null and the other checks the sale_amount is greater than $4.00. Now only rows that satisfy those two conditions will be loaded.
+
+Projection Pushdown
+Projection pushdown is useful when you do not need to load in the entire dataset. You can select a smaller number of columns than the number that are in the data, and the extra columns will not be loaded like so:
+
+cols_to_select = ["sale_id", "sale_amount", "name"]
+
+from pyspark.sql import functions as F
+
+(
+
+    spark.read.load(path)
+    .select(cols_to_select)
+    .explain()
+)
+
+== Physical Plan ==
+*(1) Project [sale_id#1216, sale_amount#1217, name#1218]
++- *(1) ColumnarToRow
+   +- FileScan parquet [sale_id#1216,sale_amount#1217,name#1218,date#1219] Batched: true, DataFilters: [], Format: Parquet, Location: InMemoryFileIndex(1 paths)[file:/Users/justindavis/Documents/my_projects/filter_dataset], PartitionFilters: [], PushedFilters: [], ReadSchema: struct<sale_id:string,sale_amount:double,name:string>
+You can see the ReadSchema portion does not include date.
+
+Spark is also able to optimize projection pushdowns when you do not specify the reduced number of columns. Say you wanted to aggregate the total sales per customer first name. When you run that logic only the name and the sale_amount will be loaded in:
+
+(
+    spark.read.load(path)
+    .groupBy("name")
+    .agg(F.sum("sale_amount").alias("total_sales"))
+    .explain()
+)
+== Physical Plan ==
+AdaptiveSparkPlan isFinalPlan=false
++- HashAggregate(keys=[name#1230], functions=[sum(sale_amount#1229)])
+   +- Exchange hashpartitioning(name#1230, 200), ENSURE_REQUIREMENTS, [plan_id=385]
+      +- HashAggregate(keys=[name#1230], functions=[partial_sum(sale_amount#1229)])
+         +- Project [sale_amount#1229, name#1230]
+            +- FileScan parquet [sale_amount#1229,name#1230,date#1231] Batched: true, DataFilters: [], Format: Parquet, Location: InMemoryFileIndex(1 paths)[file:/Users/justindavis/Documents/my_projects/filter_dataset], PartitionFilters: [], PushedFilters: [], ReadSchema: struct<sale_amount:double,name:string>
+Again, in the ReadSchema portion, only sale_amount and name are used.
+
+Partition Filters
+Finally, partition pruning takes adavantage of how data is stored. This dataset is partitioned by date. If you only want sales for the last seven days, you can specify the date to be greater than 7 days ago like so:
+
+(
+    spark.read.load(path)
+    .filter(F.col("date") >= F.lit("2023-06-17"))
+    .explain()
+)
+== Physical Plan ==
+*(1) ColumnarToRow
++- FileScan parquet [sale_id#1262,sale_amount#1263,name#1264,date#1265] Batched: true, DataFilters: [], Format: Parquet, Location: InMemoryFileIndex(1 paths)[file:/Users/justindavis/Documents/my_projects/filter_dataset], PartitionFilters: [isnotnull(date#1265), (date#1265 >= 2023-06-17)], PushedFilters: [], ReadSchema: struct<sale_id:string,sale_amount:double,name:string>
+Looking through the physical plan, now the PartitionFilters is populated where date is not null and date is greater than or equal to 2023–06–17. All dates before 2023–06–17 will not be loaded in, reducing the memory footprint of the dataset you are working with
+
+Summary
+This article explains three different types of filtering that can be applied to datasets on load and how to verify that filter is being applied. All three strategies are important to know and will save your spark job time and space.
