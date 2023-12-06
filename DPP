@@ -1,0 +1,60 @@
+Dynamic Partition Pruning
+Amit Singh Rathore
+Geek Culture
+Amit Singh Rathore
+
+·
+Follow
+
+Published in
+Geek Culture
+
+·
+2 min read
+·
+Jul 11, 2022
+10
+
+
+
+
+
+
+Query performance optimization in Spark 3
+
+Partition pruning is one of the data skipping techniques used by most query engines like Spark and Presto. These engines make a decision to only read the partitions that are needed for the processing and eliminate the processing of all the other partitions. This pruning is achieved via filter/predicate push down. But this happens at the query analysis time. Spark 3 introduced dynamic partition pruning which does this at run time. The feature works on a partitioned table and transforms one side of the join into a broadcasted “dynamic filter” used to skip the irrelevant partitions of another side of the join.
+
+Note: In equi joins if one of the join tables is smaller, Spark itself opts for BHJ (provided result size is within threshold memory).
+
+Dynamic Partition Pruning = Predicate Push Down + Broadcast Hash Join
+
+The steps included in partition pruning can be summarized below:
+
+The smaller(dimension) table is queried and filtered. A hash table is built as part of the filter query.
+Spark uses the result of this query (and hash table) to create a broadcast variable
+Then, it will broadcast the filter to each executor
+At runtime, Spark’s physical plan is changed so that the dynamic filter is applied to the bigger(fact) table. This dynamic filter is created as an internal subquery built from the filter applied to the smaller table.
+spark.sql.optimizer.dynamicPartitionPruning.enabled=true
+
+Hence at each executer when only selected filters are pulled up rather than all partitions. Whether DPP is used or not can be seen in the query plan. We need to look for keywords PartotionFilters and dynamicpruningexpression.
+
+
+Image — from data bricks doc
+For example for the following query:
+
+SELECT f.col1, d.col2 FROM fact f 
+JOIN dimension d ON f.join_col = d.join_col
+WHERE d.partition_col < some_val
+Dynamic filter subquery will be conceptually similar to…
+
+SELECT f.col1 FROM fact  
+WHERE f.partition_col IN (
+SELECT d.partition_col FROM dimension 
+WHERE dimension.partition_col < some_val
+)
+Note: DPP has the following constraints:
+
+Tables that need to be pruned, must be partitioned with any one of the join key columns.
+It works only with Equi-join (joins with the ‘=’ condition).
+DPP won’t apply to the correlated subqueries
+DPP is useful for queries that follow the Star-schema architectural model.
