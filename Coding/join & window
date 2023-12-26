@@ -1,0 +1,39 @@
+# Databricks notebook source
+#join 2 df
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType 
+schema_emp = StructType(
+    [
+        StructField('empid',IntegerType()),
+        StructField('empname',StringType()),
+        StructField('cmpid',IntegerType()),
+        StructField('Salary',IntegerType())
+    ]
+)
+schema_cmp = StructType(
+    [
+        StructField('cmpid',IntegerType()),
+        StructField('cmpname',StringType())
+    ]
+)
+df_cmp = spark.read.format("csv").schema(schema_cmp).option('delimiter',',').load('/FileStore/Practise/comp.txt')
+df_emp = spark.read.format("csv").schema(schema_emp).option('delimiter',',').load('/FileStore/Practise/emp.txt')
+df_cmp.show()
+df_emp.show()
+
+# COMMAND ----------
+
+df_cmpname = df_emp.join(df_cmp,'cmpid',"inner").select(df_emp.empid,df_emp.empname,df_emp.Salary,df_cmp.cmpname)
+
+#df_cmp_name = df_emp.select(empid,empname,cmpname,salary)
+
+# COMMAND ----------
+
+from pyspark.sql.functions import row_number
+from pyspark.sql.window import Window
+winspec = Window.partitionBy("empid").orderBy("cmpname")
+df_win = df_cmpname.withColumn("rn",row_number().over(winspec))
+df_win.select("empid","empname","Salary","cmpname").where(col("rn") == 1).show()
+
+# COMMAND ----------
+
+
